@@ -8,6 +8,7 @@ import (
 	"gopkg.in/yaml.v2"
 	"errors"
 	"fmt"
+	"github.com/beevik/etree"
 	"io"
 	"io/ioutil"
 	"math"
@@ -24,7 +25,6 @@ import (
 	"time"
 
 	"github.com/abema/go-mp4"
-	"github.com/beevik/etree"
 	"github.com/grafov/m3u8"
 )
 
@@ -45,13 +45,9 @@ type Config struct {
     CoverFormat      string `yaml:"cover-format"`
     AlacSaveFolder      string `yaml:"alac-save-folder"`
     AtmosSaveFolder      string `yaml:"atmos-save-folder"`
-	Check      string `yaml:"check"`
 }
 
 var config Config
-var txtpath string
-var oktrackNum int = 0
-var trackTotalnum int = 0
 
 type SampleInfo struct {
 	data      []byte
@@ -64,6 +60,7 @@ type SongInfo struct {
 	alacParam *Alac
 	samples   []SampleInfo
 }
+
 func loadConfig() error {
     // 读取config.yaml文件内容  
     data, err := ioutil.ReadFile("config.yaml")
@@ -1104,7 +1101,17 @@ func writeLyrics(sanAlbumFolder, filename string, lrc string) error {
 	return nil
 }
 
+func isInArray(arr []int, target int) bool {
+	for _, num := range arr {
+		if num == target {
+			return true
+		}
+	}
+	return false
+}
+
 func rip(albumId string, token string, storefront string, userToken string) error {
+
 	meta, err := getMeta(albumId, token, storefront)
 	if err != nil {
 		fmt.Println("Failed to get album metadata.\n")
@@ -1115,7 +1122,7 @@ func rip(albumId string, token string, storefront string, userToken string) erro
 		singerFoldername = strings.ReplaceAll(singerFoldername, ".", "")
 	}
 	singerFoldername = strings.TrimSpace(singerFoldername)
-	singerFolder := filepath.Join(config.AlacSaveFolder, forbiddenNames.ReplaceAllString(singerFoldername, "_"))
+	singerFolder := filepath.Join("AM-DL downloads", forbiddenNames.ReplaceAllString(singerFoldername, "_"))
 	albumFolder := fmt.Sprintf("%s", meta.Data[0].Attributes.Name)
 	if strings.HasSuffix(albumFolder, ".") {
 		albumFolder = strings.ReplaceAll(albumFolder, ".", "")
@@ -1130,146 +1137,168 @@ func rip(albumId string, token string, storefront string, userToken string) erro
 		fmt.Println("Failed to write cover.")
 	}
 	trackTotal := len(meta.Data[0].Relationships.Tracks.Data)
+	arr := make([]int, trackTotal)
+	for i := 0; i < trackTotal; i++ {
+		arr[i] = i + 1
+	}
+	fmt.Print("select: ")
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println(err)
+	}
+	manually := false
+	manually_txt := false
+	m3u8_txt := ""
+	if strings.Contains(input, "txt") {
+		m3u8_txt= strings.TrimSpace(input)
+		fmt.Print(m3u8_txt)
+		strArr := make([]string, len(arr))
+		for i, num := range arr {
+			strArr[i] = strconv.Itoa(num)
+		}
+		input = strings.Join(strArr, " ")
+		manually_txt = true
+    }
+	if strings.Contains(input, "#") {
+        input = strings.ReplaceAll(input, "#", "")
+		manually = true
+    }
+	input = strings.TrimSpace(input)
+	inputs := strings.Fields(input)
+	for _, str := range inputs {
+		num, err := strconv.Atoi(str)
+		if err != nil {
+			fmt.Printf("wrong '%s', skip...\n", str)
+		}
+
+		for i := 0; i < len(arr); i++ {
+			if arr[i] == num {
+				arr = append(arr[:i], arr[i+1:]...)
+				break
+			}
+		}
+	}
 	for trackNum, track := range meta.Data[0].Relationships.Tracks.Data {
 		trackNum++
-		trackTotalnum += 1
-		fmt.Printf("Track %d of %d:\n", trackNum, trackTotal)
-		manifest, err := getInfoFromAdam(track.ID, token, storefront)
-		if err != nil {
-			fmt.Println("Failed to get manifest.\n", err)
+		if isInArray(arr, trackNum) {
 			continue
-		}
-		if manifest.Attributes.ExtendedAssetUrls.EnhancedHls == "" {
-			fmt.Println("Unavailable in ALAC.")
-			continue
-		}
-		filename := fmt.Sprintf("%02d. %s.m4a", trackNum, forbiddenNames.ReplaceAllString(track.Attributes.Name, "_"))
-		lrcFilename := fmt.Sprintf("%02d. %s.lrc", trackNum, forbiddenNames.ReplaceAllString(track.Attributes.Name, "_"))
-		trackPath := filepath.Join(sanAlbumFolder, filename)
-		var lrc string = ""
-		if userToken != "your-media-user-token" && (config.EmbedLrc || config.SaveLrcFile) {
-			ttml, err := getSongLyrics(track.ID, storefront, token, userToken)
+		} else {
+			fmt.Printf("Track %d of %d:\n", trackNum, trackTotal)
+			manifest, err := getInfoFromAdam(track.ID, token, storefront)
 			if err != nil {
-				fmt.Println("Failed to get lyrics")
-			} else {
-				lrc, err = conventTTMLToLRC(ttml)
+				fmt.Println("Failed to get manifest.\n", err)
+				continue
+			}
+			if manifest.Attributes.ExtendedAssetUrls.EnhancedHls == "" {
+				fmt.Println("Unavailable in ALAC.")
+				continue
+			}
+			filename := fmt.Sprintf("%02d. %s.m4a", trackNum, forbiddenNames.ReplaceAllString(track.Attributes.Name, "_"))
+			fmt.Println(filename)
+			lrcFilename := fmt.Sprintf("%02d. %s.lrc", trackNum, forbiddenNames.ReplaceAllString(track.Attributes.Name, "_"))
+			trackPath := filepath.Join(sanAlbumFolder, filename)
+			var lrc string = ""
+			if userToken != "your-media-user-token" && (config.EmbedLrc || config.SaveLrcFile) {
+				ttml, err := getSongLyrics(track.ID, storefront, token, userToken)
 				if err != nil {
-					fmt.Printf("Failed to parse lyrics: %s \n", err)
+					fmt.Println("Failed to get lyrics")
 				} else {
-					if config.SaveLrcFile {
-						err := writeLyrics(sanAlbumFolder, lrcFilename, lrc)
-						if err != nil {
-							fmt.Printf("Failed to write lyrics")
-						}
-						if !config.EmbedLrc {
-							lrc = ""
+					lrc, err = conventTTMLToLRC(ttml)
+					if err != nil {
+						fmt.Printf("Failed to parse lyrics: %s \n", err)
+					} else {
+						if config.SaveLrcFile {
+							err := writeLyrics(sanAlbumFolder, lrcFilename, lrc)
+							if err != nil {
+								fmt.Printf("Failed to write lyrics")
+							}
+							if !config.EmbedLrc {
+								lrc = ""
+							}
 						}
 					}
 				}
 			}
-		}
-		exists, err := fileExists(trackPath)
-		if err != nil {
-			fmt.Println("Failed to check if track exists.")
-		}
-		if exists {
-			fmt.Println("Track already exists locally.")
-			oktrackNum += 1
-			continue
-		}
-		if config.Check != ""{
-			config.Check=strings.TrimSpace(config.Check)
-			if strings.HasSuffix(config.Check, "txt") {
-				txtpath=config.Check
-			}
-			if strings.HasPrefix(config.Check, "http") {
-				req, err := http.NewRequest("GET", config.Check, nil)
-				if err != nil {
-					fmt.Println(err)
-				}
-
-				query := req.URL.Query()
-				query.Set("songid", track.ID)
-				req.URL.RawQuery = query.Encode()
-
-				do, err := http.DefaultClient.Do(req)
-				if err != nil {
-					fmt.Println(err)
-				}
-				defer do.Body.Close()
-
-				Checkbody, err := ioutil.ReadAll(do.Body)
-				if err != nil {
-					fmt.Println(err)
-				}
-				if string(Checkbody) != "no_found"{
-					manifest.Attributes.ExtendedAssetUrls.EnhancedHls=string(Checkbody)
-					fmt.Println("Found m3u8 from API")
-				}
-			}
-		}
-		if txtpath != "" {
-			file, err := os.Open(txtpath)
+			exists, err := fileExists(trackPath)
 			if err != nil {
-				fmt.Println("cant open txt:", err)
+				fmt.Println("Failed to check if track exists.")
 			}
-			defer file.Close()
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if strings.HasPrefix(line, track.ID) {
-					parts := strings.SplitN(line, ",", 2)
-					if len(parts) == 2 {
-						manifest.Attributes.ExtendedAssetUrls.EnhancedHls=parts[1]
-						fmt.Println("Found m3u8 from txt")
+			if exists {
+				fmt.Println("Track already exists locally.")
+				continue
+			}
+			if manually_txt {
+				file, err := os.Open(m3u8_txt)
+				if err != nil {
+					fmt.Println("cant open txt:", err)
+				}
+				defer file.Close()
+				scanner := bufio.NewScanner(file)
+				for scanner.Scan() {
+					line := scanner.Text()
+					if strings.HasPrefix(line, track.ID) {
+						parts := strings.SplitN(line, ",", 2)
+						if len(parts) == 2 {
+							manifest.Attributes.ExtendedAssetUrls.EnhancedHls=parts[1]
+						}
 					}
 				}
-			}
-			if err := scanner.Err(); err != nil {
-				fmt.Println(err)
-			}
-		}
-		trackUrl, keys, err := extractMedia(manifest.Attributes.ExtendedAssetUrls.EnhancedHls)
-		if err != nil {
-			fmt.Println("Failed to extract info from manifest.\n", err)
-			continue
-		}
-		info, err := extractSong(trackUrl)
-		if err != nil {
-			fmt.Println("Failed to extract track.", err)
-			continue
-		}
-		samplesOk := true
-		for samplesOk {
-			for _, i := range info.samples {
-				if int(i.descIndex) >= len(keys) {
-					fmt.Println("Decryption size mismatch.")
-					samplesOk = false
+				if err := scanner.Err(); err != nil {
+					fmt.Println(err)
 				}
 			}
-			break
+			if manually {
+				fmt.Print("m3u8: ")
+				reader := bufio.NewReader(os.Stdin)
+				m3u8_url, err := reader.ReadString('\n')
+				if err != nil {
+					fmt.Println(err)
+				}
+				m3u8_url = strings.TrimSpace(m3u8_url)
+				manifest.Attributes.ExtendedAssetUrls.EnhancedHls=m3u8_url
+			}
+			trackUrl, keys, err := extractMedia(manifest.Attributes.ExtendedAssetUrls.EnhancedHls)
+			if err != nil {
+				fmt.Println("Failed to extract info from manifest.\n", err)
+				continue
+			}
+			info, err := extractSong(trackUrl)
+			if err != nil {
+				fmt.Println("Failed to extract track.", err)
+				continue
+			}
+			samplesOk := true
+			for samplesOk {
+				for _, i := range info.samples {
+					if int(i.descIndex) >= len(keys) {
+						fmt.Println("Decryption size mismatch.")
+						samplesOk = false
+					}
+				}
+				break
+			}
+			if !samplesOk {
+				continue
+			}
+			err = decryptSong(info, keys, meta, trackPath, trackNum, trackTotal)
+			if err != nil {
+				fmt.Println("Failed to decrypt track.\n", err)
+				continue
+			}
+			tags := []string{
+				fmt.Sprintf("lyrics=%s", lrc),
+			}
+			if config.EmbedCover {
+				tags = append(tags, fmt.Sprintf("cover=%s/cover.%s", sanAlbumFolder, config.CoverFormat))
+			}
+			tagsString := strings.Join(tags, ":")
+			cmd := exec.Command("MP4Box", "-itags", tagsString, trackPath)
+			if err := cmd.Run(); err != nil {
+				fmt.Printf("Embed failed: %v\n", err)
+				continue
+			}
 		}
-		if !samplesOk {
-			continue
-		}
-		err = decryptSong(info, keys, meta, trackPath, trackNum, trackTotal)
-		if err != nil {
-			fmt.Println("Failed to decrypt track.\n", err)
-			continue
-		}
-		tags := []string{
-			fmt.Sprintf("lyrics=%s", lrc),
-		}
-		if config.EmbedCover {
-			tags = append(tags, fmt.Sprintf("cover=%s/cover.%s", sanAlbumFolder, config.CoverFormat))
-		}
-		tagsString := strings.Join(tags, ":")
-		cmd := exec.Command("MP4Box", "-itags", tagsString, trackPath)
-		if err := cmd.Run(); err != nil {
-			fmt.Printf("Embed failed: %v\n", err)
-			continue
-		}
-		oktrackNum += 1
 	}
 	return err
 }
@@ -1289,33 +1318,22 @@ func main() {
 	for albumNum, url := range os.Args[1:] {
 		fmt.Printf("Album %d of %d:\n", albumNum+1, albumTotal)
 		var storefront, albumId string
-		if strings.Contains(url, ".txt") {
-			txtpath = url
-			fileName := filepath.Base(url)
-			parts := strings.SplitN(fileName, "_", 3)
-			storefront = parts[0]
-			albumId = parts[1]
+		if strings.Contains(url, "/playlist/") {
+			storefront, albumId = checkUrlPlaylist(url)
 		} else {
-			if strings.Contains(url, "/playlist/") {
-				storefront, albumId = checkUrlPlaylist(url)
-				txtpath = ""
-			} else {
-				storefront, albumId = checkUrl(url)
-				txtpath = ""
-			}
+			storefront, albumId = checkUrl(url)
 		}
 
 		if albumId == "" {
 			fmt.Printf("Invalid URL: %s\n", url)
 			continue
 		}
-		err = rip(albumId, token, storefront, config.MediaUserToken)
+		err := rip(albumId, token, storefront, config.MediaUserToken)
 		if err != nil {
 			fmt.Println("Album failed.")
 			fmt.Println(err)
 		}
 	}
-	fmt.Printf("=======  Completed %d/%d ###### %d errors!! =======\n", oktrackNum, trackTotalnum, trackTotalnum-oktrackNum)
 }
 
 func conventTTMLToLRC(ttml string) (string, error) {
